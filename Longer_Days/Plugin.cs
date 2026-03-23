@@ -3,17 +3,20 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
 using System.Collections.Generic;
+using TMPro;
 
 namespace Longer_Days
 {
-    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.0.0")]
+    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.1.0")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource log;
         internal static ConfigEntry<string> TimeSpeed;
+        internal static ConfigEntry<string> ClockFormat;
         private Harmony harmony;
 
         private const string DefaultTimeSpeedLabel = "0.5 (Half speed)";
+        private const string DefaultClockFormatLabel = "24 Hour";
 
         private static readonly Dictionary<string, float> TimeSpeedMap = new Dictionary<string, float>
         {
@@ -43,6 +46,12 @@ namespace Longer_Days
             "1.0 (Normal)"
         };
 
+        private static readonly string[] ClockFormatOptions =
+        {
+            "12 Hour",
+            "24 Hour"
+        };
+
         private void Awake()
         {
             log = Logger;
@@ -57,17 +66,20 @@ namespace Longer_Days
                 )
             );
 
-            // If an older config value exists and is invalid, force it back to the safe default.
-            if (!TimeSpeedMap.ContainsKey(TimeSpeed.Value))
-            {
-                log.LogWarning("Invalid TimeSpeed config value found: " + TimeSpeed.Value + ". Resetting to " + DefaultTimeSpeedLabel);
-                TimeSpeed.Value = DefaultTimeSpeedLabel;
-            }
-
-            log.LogInfo("Longer Days loaded. TimeSpeed = " + TimeSpeed.Value + " -> " + GetSafeTimeSpeed());
+            ClockFormat = Config.Bind(
+                "General",
+                "ClockFormat",
+                DefaultClockFormatLabel,
+                new ConfigDescription(
+                    "Choose 12-hour or 24-hour clock display.",
+                    new AcceptableValueList<string>(ClockFormatOptions)
+                )
+            );
 
             harmony = new Harmony("ElecTRiCbOi59.LongerDays");
             harmony.PatchAll();
+
+            log.LogInfo("Longer Days loaded.");
         }
 
         internal static float GetSafeTimeSpeed()
@@ -77,24 +89,30 @@ namespace Longer_Days
             {
                 return speed;
             }
-
-            log.LogWarning("Unknown TimeSpeed value: " + TimeSpeed.Value + ". Falling back to " + DefaultTimeSpeedLabel);
             return 0.5f;
         }
-    }
 
-    [HarmonyPatch(typeof(TimeOfDay), "Start")]
-    internal class TimeOfDayStartPatch
-    {
-        [HarmonyPostfix]
-        private static void StartPostfix(TimeOfDay __instance)
+        internal static bool Use12HourClock()
         {
-            float speed = LongerDaysPlugin.GetSafeTimeSpeed();
-            LongerDaysPlugin.log.LogInfo("Applying TimeSpeed = " + speed);
-            __instance.globalTimeSpeedMultiplier = speed;
+            return ClockFormat.Value == "12 Hour";
+        }
+
+        internal static string FormatTime(int hour, int minute)
+        {
+            if (Use12HourClock())
+            {
+                string suffix = hour >= 12 ? "PM" : "AM";
+                int h = hour % 12;
+                if (h == 0) h = 12;
+
+                return h.ToString("00") + ":" + minute.ToString("00") + " " + suffix;
+            }
+
+            return hour.ToString("00") + ":" + minute.ToString("00");
         }
     }
 
+    // TIME SPEED
     [HarmonyPatch(typeof(TimeOfDay), "Update")]
     internal class TimeOfDayUpdatePatch
     {
@@ -102,6 +120,28 @@ namespace Longer_Days
         private static void UpdatePostfix(TimeOfDay __instance)
         {
             __instance.globalTimeSpeedMultiplier = LongerDaysPlugin.GetSafeTimeSpeed();
+        }
+    }
+
+    // CLOCK DISPLAY
+    [HarmonyPatch(typeof(HUDManager), "SetClock")]
+    internal class HUDManagerPatch
+    {
+        [HarmonyPostfix]
+        private static void SetClockPatch(float timeNormalized, float numberOfHours)
+        {
+            if (HUDManager.Instance == null)
+                return;
+
+            var clock = HUDManager.Instance.clockNumber;
+
+            int totalMinutes = (int)(timeNormalized * (60f * numberOfHours)) + 360;
+            int hour = totalMinutes / 60;
+            int minute = totalMinutes % 60;
+
+            string formatted = LongerDaysPlugin.FormatTime(hour, minute);
+
+            ((TMP_Text)clock).text = formatted;
         }
     }
 }
