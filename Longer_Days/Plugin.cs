@@ -13,6 +13,7 @@ namespace Longer_Days
     {
         private const string DefaultTimeSpeedLabel = "0.5 (Half speed)";
         private const string DefaultClockFormatLabel = "24 Hour";
+        private const bool DefaultShowClockIndoors = false;
 
         private static readonly string[] TimeSpeedOptions =
         {
@@ -38,6 +39,7 @@ namespace Longer_Days
         public SyncedEntry<string> TimeSpeed;
 
         public ConfigEntry<string> ClockFormat { get; private set; }
+        public ConfigEntry<bool> ShowClockIndoors { get; private set; }
 
         public LongerDaysConfig(ConfigFile cfg) : base("ElecTRiCbOi59.LongerDays")
         {
@@ -61,11 +63,21 @@ namespace Longer_Days
                 )
             );
 
+            ShowClockIndoors = cfg.Bind(
+                new ConfigDefinition("Display Settings", "ShowClockIndoors"),
+                DefaultShowClockIndoors,
+                new ConfigDescription(
+                    "Show the clock inside the ship and buildings.\n\n" +
+                    "LOCAL: This setting only affects your own display.\n" +
+                    "Disabled = default game behaviour."
+                )
+            );
+
             ConfigManager.Register(this);
         }
     }
 
-    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.2.0")]
+    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.3.0")]
     [BepInDependency("com.sigurd.csync", "5.0.1")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
@@ -99,6 +111,7 @@ namespace Longer_Days
             log.LogInfo("Longer Days loaded (Sigurd-CSync).");
             log.LogInfo("Synced host TimeSpeed = " + Config.TimeSpeed.Value);
             log.LogInfo("Local ClockFormat = " + Config.ClockFormat.Value);
+            log.LogInfo("Local ShowClockIndoors = " + Config.ShowClockIndoors.Value);
         }
 
         internal static float GetTimeSpeed()
@@ -116,6 +129,11 @@ namespace Longer_Days
         internal static bool Use12HourClock()
         {
             return Config.ClockFormat.Value == "12 Hour";
+        }
+
+        internal static bool ShouldShowClockIndoors()
+        {
+            return Config.ShowClockIndoors.Value;
         }
 
         internal static string FormatTime(int hour, int minute)
@@ -164,6 +182,21 @@ namespace Longer_Days
 
             string formatted = LongerDaysPlugin.FormatTime(hour, minute);
             ((TMP_Text)HUDManager.Instance.clockNumber).text = formatted;
+        }
+    }
+
+    [HarmonyPatch(typeof(HUDManager), "Update")]
+    internal class IndoorClockPatch
+    {
+        [HarmonyPrefix]
+        private static void UpdatePrefix(ref HUDElement ___Clock)
+        {
+            if (!LongerDaysPlugin.ShouldShowClockIndoors())
+            {
+                return;
+            }
+
+            ___Clock.targetAlpha = 1f;
         }
     }
 }
