@@ -77,7 +77,7 @@ namespace Longer_Days
         }
     }
 
-    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.3.0")]
+    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.3.1")]
     [BepInDependency("com.sigurd.csync", "5.0.1")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
@@ -158,10 +158,29 @@ namespace Longer_Days
     [HarmonyPatch(typeof(TimeOfDay), "Update")]
     internal class TimePatch
     {
+        private static bool hasInitialized;
+        private static float vanillaTimeSpeed = 1.4f;
+        private static float lastAppliedScale = 1f;
+
         [HarmonyPostfix]
         private static void UpdatePostfix(TimeOfDay __instance)
         {
-            __instance.globalTimeSpeedMultiplier = LongerDaysPlugin.GetTimeSpeed();
+            float selectedScale = LongerDaysPlugin.GetTimeSpeed();
+
+            if (!hasInitialized)
+            {
+                vanillaTimeSpeed = __instance.globalTimeSpeedMultiplier;
+                lastAppliedScale = 1f;
+                hasInitialized = true;
+            }
+            else if (lastAppliedScale > 0f)
+            {
+                vanillaTimeSpeed = __instance.globalTimeSpeedMultiplier / lastAppliedScale;
+            }
+
+            float appliedSpeed = vanillaTimeSpeed * selectedScale;
+            __instance.globalTimeSpeedMultiplier = appliedSpeed;
+            lastAppliedScale = selectedScale;
         }
     }
 
