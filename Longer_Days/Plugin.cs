@@ -2,7 +2,6 @@
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
-using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using CSync.Lib;
@@ -82,7 +81,8 @@ namespace Longer_Days
                 new ConfigDefinition("Display Settings", "CompactClock"),
                 DefaultCompactClock,
                 new ConfigDescription(
-                    "Makes the clock more compact by reducing its height, shrinking the icon, and preventing wrapping.\n\n" +
+                    "Makes the clock more compact by shrinking the icon and tightening the layout.\n\n" +
+                    "Useful if the default clock feels a bit bulky.\n\n" +
                     "LOCAL: This setting only affects your own display."
                 )
             );
@@ -91,7 +91,7 @@ namespace Longer_Days
                 new ConfigDefinition("Display Settings", "RaiseClock"),
                 DefaultRaiseClock,
                 new ConfigDescription(
-                    "Raises the clock higher on the screen while keeping a small margin from the top.\n\n" +
+                    "Raises the clock a little higher on the screen while keeping some margin from the top.\n\n" +
                     "LOCAL: This setting only affects your own display."
                 )
             );
@@ -104,38 +104,40 @@ namespace Longer_Days
     [BepInDependency("com.sigurd.csync", "5.0.1")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
+        private const float RaisedClockYOffset = 28f;
+        private const float CompactClockHeight = 50f;
+        private const float CompactIconScale = 0.42f;
+
+        private static readonly Vector3 Compact12HourTextOffset = new Vector3(-6f, -1f, 0f);
+        private static readonly Vector3 Compact12HourIconOffset = new Vector3(-28f, -1f, 0f);
+        private static readonly Vector3 Compact24HourIconOffset = new Vector3(-12f, -1f, 0f);
+
         internal static ManualLogSource log;
         internal static new LongerDaysConfig Config;
 
         private Harmony harmony;
 
-        private static readonly Dictionary<string, float> TimeSpeedMap = new Dictionary<string, float>
+        private sealed class ClockUiState
         {
-            { "0.1 (Very slow)", 0.1f },
-            { "0.2", 0.2f },
-            { "0.3", 0.3f },
-            { "0.4", 0.4f },
-            { "0.5 (Half speed)", 0.5f },
-            { "0.6", 0.6f },
-            { "0.7", 0.7f },
-            { "0.8", 0.8f },
-            { "0.9", 0.9f },
-            { "1.0 (Normal)", 1.0f }
-        };
+            internal Transform Parent;
+            internal RectTransform ParentRect;
+            internal RectTransform IconRect;
+            internal TMP_Text Text;
 
-        private static bool hasStoredClockLayoutDefaults;
-        private static Transform cachedClockParent;
-        private static RectTransform cachedClockParentRect;
-        private static RectTransform cachedClockIconRect;
-        private static TMP_Text cachedClockText;
+            internal Vector3 DefaultParentLocalPosition;
+            internal Vector2 DefaultParentSizeDelta;
+            internal Vector3 DefaultTextLocalPosition;
+            internal Vector2 DefaultIconSizeDelta;
+            internal Vector3 DefaultIconLocalPosition;
+            internal bool DefaultWordWrapping;
+            internal TextAlignmentOptions DefaultAlignment;
 
-        private static Vector3 defaultClockParentLocalPosition;
-        private static Vector2 defaultClockParentSizeDelta;
-        private static Vector3 defaultClockTextLocalPosition;
-        private static Vector2 defaultClockIconSizeDelta;
-        private static Vector3 defaultClockIconLocalPosition;
-        private static bool defaultClockWordWrapping;
-        private static TextAlignmentOptions defaultClockAlignment;
+            internal bool DefaultsCaptured;
+        }
+
+        private static ClockUiState clockUi;
+        private static TimeOfDay currentTimeOfDay;
+        private static float vanillaTimeSpeed = 1.4f;
 
         private void Awake()
         {
@@ -153,41 +155,39 @@ namespace Longer_Days
             log.LogInfo("Local RaiseClock = " + Config.RaiseClock.Value);
         }
 
-        internal static float GetTimeSpeed()
+        internal static float GetConfiguredTimeScale()
         {
-            float speed;
-            if (TimeSpeedMap.TryGetValue(Config.TimeSpeed.Value, out speed))
+            switch (Config.TimeSpeed.Value)
             {
-                return speed;
+                case "0.1 (Very slow)":
+                    return 0.1f;
+                case "0.2":
+                    return 0.2f;
+                case "0.3":
+                    return 0.3f;
+                case "0.4":
+                    return 0.4f;
+                case "0.5 (Half speed)":
+                    return 0.5f;
+                case "0.6":
+                    return 0.6f;
+                case "0.7":
+                    return 0.7f;
+                case "0.8":
+                    return 0.8f;
+                case "0.9":
+                    return 0.9f;
+                case "1.0 (Normal)":
+                    return 1.0f;
+                default:
+                    log.LogWarning("Unknown TimeSpeed value '" + Config.TimeSpeed.Value + "'. Falling back to 0.5.");
+                    return 0.5f;
             }
-
-            log.LogWarning("Invalid TimeSpeed value detected. Falling back to default.");
-            return 0.5f;
-        }
-
-        internal static bool Use12HourClock()
-        {
-            return Config.ClockFormat.Value == "12 Hour";
-        }
-
-        internal static bool ShouldShowClockIndoors()
-        {
-            return Config.ShowClockIndoors.Value;
-        }
-
-        internal static bool UseCompactClock()
-        {
-            return Config.CompactClock.Value;
-        }
-
-        internal static bool UseRaiseClock()
-        {
-            return Config.RaiseClock.Value;
         }
 
         internal static string FormatTime(int hour, int minute)
         {
-            if (Use12HourClock())
+            if (Config.ClockFormat.Value == "12 Hour")
             {
                 string suffix = hour >= 12 ? "PM" : "AM";
                 int displayHour = hour % 12;
@@ -203,103 +203,127 @@ namespace Longer_Days
             return hour.ToString("00") + ":" + minute.ToString("00");
         }
 
-        internal static void ApplyClockLayout()
+        internal static void RefreshClockLayout()
         {
-            if (!TryCacheClockReferences())
+            if (!BindClockUi())
             {
                 return;
             }
 
-            if (!hasStoredClockLayoutDefaults)
+            CaptureClockDefaultsIfNeeded();
+            RestoreClockDefaults();
+
+            if (Config.RaiseClock.Value)
             {
-                defaultClockParentLocalPosition = cachedClockParent.localPosition;
-                defaultClockParentSizeDelta = cachedClockParentRect.sizeDelta;
-                defaultClockTextLocalPosition = cachedClockText.transform.localPosition;
-                defaultClockIconSizeDelta = cachedClockIconRect.sizeDelta;
-                defaultClockIconLocalPosition = cachedClockIconRect.transform.localPosition;
-                defaultClockWordWrapping = cachedClockText.enableWordWrapping;
-                defaultClockAlignment = cachedClockText.alignment;
-                hasStoredClockLayoutDefaults = true;
+                clockUi.Parent.localPosition += new Vector3(0f, RaisedClockYOffset, 0f);
             }
 
-            cachedClockParent.localPosition = defaultClockParentLocalPosition;
-            cachedClockParentRect.sizeDelta = defaultClockParentSizeDelta;
-            cachedClockText.transform.localPosition = defaultClockTextLocalPosition;
-            cachedClockIconRect.sizeDelta = defaultClockIconSizeDelta;
-            cachedClockIconRect.transform.localPosition = defaultClockIconLocalPosition;
-            cachedClockText.enableWordWrapping = defaultClockWordWrapping;
-            cachedClockText.alignment = defaultClockAlignment;
-
-            if (UseRaiseClock())
+            if (!Config.CompactClock.Value)
             {
-                cachedClockParent.localPosition += new Vector3(0f, 28f, 0f);
+                return;
             }
 
-            if (UseCompactClock())
-            {
-                cachedClockParentRect.sizeDelta = new Vector2(cachedClockParentRect.sizeDelta.x, 50f);
-                cachedClockText.enableWordWrapping = false;
-                cachedClockText.alignment = TextAlignmentOptions.Center;
-                cachedClockIconRect.sizeDelta = defaultClockIconSizeDelta * 0.42f;
+            clockUi.ParentRect.sizeDelta = new Vector2(clockUi.ParentRect.sizeDelta.x, CompactClockHeight);
+            clockUi.Text.enableWordWrapping = false;
+            clockUi.Text.alignment = TextAlignmentOptions.Center;
+            clockUi.IconRect.sizeDelta = clockUi.DefaultIconSizeDelta * CompactIconScale;
 
-                if (Use12HourClock())
-                {
-                    cachedClockText.transform.localPosition += new Vector3(-6, -1f, 0f);
-                    cachedClockIconRect.transform.localPosition += new Vector3(-28f, -1f, 0f);
-                }
-                else
-                {
-                    cachedClockIconRect.transform.localPosition += new Vector3(-12f, -1f, 0f);
-                }
+            if (Config.ClockFormat.Value == "12 Hour")
+            {
+                clockUi.Text.transform.localPosition += Compact12HourTextOffset;
+                clockUi.IconRect.transform.localPosition += Compact12HourIconOffset;
+            }
+            else
+            {
+                clockUi.IconRect.transform.localPosition += Compact24HourIconOffset;
             }
         }
 
-        private static bool TryCacheClockReferences()
+        private static void CaptureClockDefaultsIfNeeded()
+        {
+            if (clockUi.DefaultsCaptured)
+            {
+                return;
+            }
+
+            // Cache the original HUD layout once so config changes can be applied
+            // and reverted cleanly without stacking offsets every time SetClock runs.
+            clockUi.DefaultParentLocalPosition = clockUi.Parent.localPosition;
+            clockUi.DefaultParentSizeDelta = clockUi.ParentRect.sizeDelta;
+            clockUi.DefaultTextLocalPosition = clockUi.Text.transform.localPosition;
+            clockUi.DefaultIconSizeDelta = clockUi.IconRect.sizeDelta;
+            clockUi.DefaultIconLocalPosition = clockUi.IconRect.transform.localPosition;
+            clockUi.DefaultWordWrapping = clockUi.Text.enableWordWrapping;
+            clockUi.DefaultAlignment = clockUi.Text.alignment;
+            clockUi.DefaultsCaptured = true;
+        }
+
+        private static void RestoreClockDefaults()
+        {
+            clockUi.Parent.localPosition = clockUi.DefaultParentLocalPosition;
+            clockUi.ParentRect.sizeDelta = clockUi.DefaultParentSizeDelta;
+            clockUi.Text.transform.localPosition = clockUi.DefaultTextLocalPosition;
+            clockUi.IconRect.sizeDelta = clockUi.DefaultIconSizeDelta;
+            clockUi.IconRect.transform.localPosition = clockUi.DefaultIconLocalPosition;
+            clockUi.Text.enableWordWrapping = clockUi.DefaultWordWrapping;
+            clockUi.Text.alignment = clockUi.DefaultAlignment;
+        }
+
+        private static bool BindClockUi()
         {
             if (HUDManager.Instance == null || HUDManager.Instance.clockNumber == null || HUDManager.Instance.clockIcon == null)
             {
-                cachedClockParent = null;
-                cachedClockParentRect = null;
-                cachedClockIconRect = null;
-                cachedClockText = null;
-                hasStoredClockLayoutDefaults = false;
+                clockUi = null;
                 return false;
             }
 
-            if (cachedClockParent == null)
+            if (clockUi != null && clockUi.Parent != null && clockUi.Text != null && clockUi.IconRect != null)
             {
-                cachedClockText = (TMP_Text)HUDManager.Instance.clockNumber;
-                cachedClockParent = cachedClockText.transform.parent;
-                cachedClockParentRect = cachedClockParent.GetComponent<RectTransform>();
-                cachedClockIconRect = HUDManager.Instance.clockIcon.GetComponent<RectTransform>();
-
-                if (cachedClockParentRect == null || cachedClockIconRect == null)
-                {
-                    return false;
-                }
+                return true;
             }
 
+            TMP_Text clockText = (TMP_Text)HUDManager.Instance.clockNumber;
+            Transform clockParent = clockText.transform.parent;
+            RectTransform clockParentRect = clockParent != null ? clockParent.GetComponent<RectTransform>() : null;
+            RectTransform clockIconRect = HUDManager.Instance.clockIcon.GetComponent<RectTransform>();
+
+            if (clockParent == null || clockParentRect == null || clockIconRect == null)
+            {
+                return false;
+            }
+
+            clockUi = new ClockUiState
+            {
+                Parent = clockParent,
+                ParentRect = clockParentRect,
+                IconRect = clockIconRect,
+                Text = clockText
+            };
+
             return true;
+        }
+
+        internal static void ApplyScaledTimeSpeed(TimeOfDay timeOfDay)
+        {
+            if (currentTimeOfDay != timeOfDay)
+            {
+                // A new TimeOfDay instance can appear on round or scene changes.
+                // Grab the current vanilla multiplier again before applying our scale.
+                currentTimeOfDay = timeOfDay;
+                vanillaTimeSpeed = timeOfDay.globalTimeSpeedMultiplier;
+            }
+
+            timeOfDay.globalTimeSpeedMultiplier = vanillaTimeSpeed * GetConfiguredTimeScale();
         }
     }
 
     [HarmonyPatch(typeof(TimeOfDay), "Update")]
     internal class TimePatch
     {
-        private static TimeOfDay cachedTimeOfDay;
-        private static float vanillaTimeSpeed = 1.4f;
-
         [HarmonyPostfix]
         private static void UpdatePostfix(TimeOfDay __instance)
         {
-            if (cachedTimeOfDay != __instance)
-            {
-                cachedTimeOfDay = __instance;
-                vanillaTimeSpeed = __instance.globalTimeSpeedMultiplier;
-            }
-
-            float selectedScale = LongerDaysPlugin.GetTimeSpeed();
-            __instance.globalTimeSpeedMultiplier = vanillaTimeSpeed * selectedScale;
+            LongerDaysPlugin.ApplyScaledTimeSpeed(__instance);
         }
     }
 
@@ -309,7 +333,7 @@ namespace Longer_Days
         [HarmonyPostfix]
         private static void AwakePostfix()
         {
-            LongerDaysPlugin.ApplyClockLayout();
+            LongerDaysPlugin.RefreshClockLayout();
         }
     }
 
@@ -328,10 +352,11 @@ namespace Longer_Days
             int hour = totalMinutes / 60;
             int minute = totalMinutes % 60;
 
-            string formatted = LongerDaysPlugin.FormatTime(hour, minute);
-            ((TMP_Text)HUDManager.Instance.clockNumber).text = formatted;
+            ((TMP_Text)HUDManager.Instance.clockNumber).text = LongerDaysPlugin.FormatTime(hour, minute);
 
-            LongerDaysPlugin.ApplyClockLayout();
+            // The game updates the clock text here, so this is a reliable place to
+            // reapply our local HUD tweaks without fighting the entire HUD every frame.
+            LongerDaysPlugin.RefreshClockLayout();
         }
     }
 
@@ -341,7 +366,7 @@ namespace Longer_Days
         [HarmonyPrefix]
         private static void UpdatePrefix(ref HUDElement ___Clock)
         {
-            if (!LongerDaysPlugin.ShouldShowClockIndoors())
+            if (!LongerDaysPlugin.Config.ShowClockIndoors.Value)
             {
                 return;
             }
