@@ -4,6 +4,7 @@ using BepInEx.Logging;
 using HarmonyLib;
 using System.Collections.Generic;
 using TMPro;
+using UnityEngine;
 using CSync.Lib;
 using CSync.Extensions;
 
@@ -14,6 +15,8 @@ namespace Longer_Days
         private const string DefaultTimeSpeedLabel = "0.5 (Half speed)";
         private const string DefaultClockFormatLabel = "24 Hour";
         private const bool DefaultShowClockIndoors = false;
+        private const bool DefaultCompactClock = false;
+        private const bool DefaultRaiseClock = false;
 
         private static readonly string[] TimeSpeedOptions =
         {
@@ -40,6 +43,8 @@ namespace Longer_Days
 
         public ConfigEntry<string> ClockFormat { get; private set; }
         public ConfigEntry<bool> ShowClockIndoors { get; private set; }
+        public ConfigEntry<bool> CompactClock { get; private set; }
+        public ConfigEntry<bool> RaiseClock { get; private set; }
 
         public LongerDaysConfig(ConfigFile cfg) : base("ElecTRiCbOi59.LongerDays")
         {
@@ -73,11 +78,29 @@ namespace Longer_Days
                 )
             );
 
+            CompactClock = cfg.Bind(
+                new ConfigDefinition("Display Settings", "CompactClock"),
+                DefaultCompactClock,
+                new ConfigDescription(
+                    "Makes the clock more compact by reducing its height, shrinking the icon, and preventing wrapping.\n\n" +
+                    "LOCAL: This setting only affects your own display."
+                )
+            );
+
+            RaiseClock = cfg.Bind(
+                new ConfigDefinition("Display Settings", "RaiseClock"),
+                DefaultRaiseClock,
+                new ConfigDescription(
+                    "Raises the clock higher on the screen while keeping a small margin from the top.\n\n" +
+                    "LOCAL: This setting only affects your own display."
+                )
+            );
+
             ConfigManager.Register(this);
         }
     }
 
-    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.3.2")]
+    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.4.0")]
     [BepInDependency("com.sigurd.csync", "5.0.1")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
@@ -100,6 +123,20 @@ namespace Longer_Days
             { "1.0 (Normal)", 1.0f }
         };
 
+        private static bool hasStoredClockLayoutDefaults;
+        private static Transform cachedClockParent;
+        private static RectTransform cachedClockParentRect;
+        private static RectTransform cachedClockIconRect;
+        private static TMP_Text cachedClockText;
+
+        private static Vector3 defaultClockParentLocalPosition;
+        private static Vector2 defaultClockParentSizeDelta;
+        private static Vector3 defaultClockTextLocalPosition;
+        private static Vector2 defaultClockIconSizeDelta;
+        private static Vector3 defaultClockIconLocalPosition;
+        private static bool defaultClockWordWrapping;
+        private static TextAlignmentOptions defaultClockAlignment;
+
         private void Awake()
         {
             log = Logger;
@@ -112,6 +149,8 @@ namespace Longer_Days
             log.LogInfo("Synced host TimeSpeed = " + Config.TimeSpeed.Value);
             log.LogInfo("Local ClockFormat = " + Config.ClockFormat.Value);
             log.LogInfo("Local ShowClockIndoors = " + Config.ShowClockIndoors.Value);
+            log.LogInfo("Local CompactClock = " + Config.CompactClock.Value);
+            log.LogInfo("Local RaiseClock = " + Config.RaiseClock.Value);
         }
 
         internal static float GetTimeSpeed()
@@ -136,6 +175,16 @@ namespace Longer_Days
             return Config.ShowClockIndoors.Value;
         }
 
+        internal static bool UseCompactClock()
+        {
+            return Config.CompactClock.Value;
+        }
+
+        internal static bool UseRaiseClock()
+        {
+            return Config.RaiseClock.Value;
+        }
+
         internal static string FormatTime(int hour, int minute)
         {
             if (Use12HourClock())
@@ -152,6 +201,85 @@ namespace Longer_Days
             }
 
             return hour.ToString("00") + ":" + minute.ToString("00");
+        }
+
+        internal static void ApplyClockLayout()
+        {
+            if (!TryCacheClockReferences())
+            {
+                return;
+            }
+
+            if (!hasStoredClockLayoutDefaults)
+            {
+                defaultClockParentLocalPosition = cachedClockParent.localPosition;
+                defaultClockParentSizeDelta = cachedClockParentRect.sizeDelta;
+                defaultClockTextLocalPosition = cachedClockText.transform.localPosition;
+                defaultClockIconSizeDelta = cachedClockIconRect.sizeDelta;
+                defaultClockIconLocalPosition = cachedClockIconRect.transform.localPosition;
+                defaultClockWordWrapping = cachedClockText.enableWordWrapping;
+                defaultClockAlignment = cachedClockText.alignment;
+                hasStoredClockLayoutDefaults = true;
+            }
+
+            cachedClockParent.localPosition = defaultClockParentLocalPosition;
+            cachedClockParentRect.sizeDelta = defaultClockParentSizeDelta;
+            cachedClockText.transform.localPosition = defaultClockTextLocalPosition;
+            cachedClockIconRect.sizeDelta = defaultClockIconSizeDelta;
+            cachedClockIconRect.transform.localPosition = defaultClockIconLocalPosition;
+            cachedClockText.enableWordWrapping = defaultClockWordWrapping;
+            cachedClockText.alignment = defaultClockAlignment;
+
+            if (UseRaiseClock())
+            {
+                cachedClockParent.localPosition += new Vector3(0f, 28f, 0f);
+            }
+
+            if (UseCompactClock())
+            {
+                cachedClockParentRect.sizeDelta = new Vector2(cachedClockParentRect.sizeDelta.x, 50f);
+                cachedClockText.enableWordWrapping = false;
+                cachedClockText.alignment = TextAlignmentOptions.Center;
+                cachedClockIconRect.sizeDelta = defaultClockIconSizeDelta * 0.42f;
+
+                if (Use12HourClock())
+                {
+                    cachedClockText.transform.localPosition += new Vector3(-6, -1f, 0f);
+                    cachedClockIconRect.transform.localPosition += new Vector3(-28f, -1f, 0f);
+                }
+                else
+                {
+                    cachedClockIconRect.transform.localPosition += new Vector3(-12f, -1f, 0f);
+                }
+            }
+        }
+
+        private static bool TryCacheClockReferences()
+        {
+            if (HUDManager.Instance == null || HUDManager.Instance.clockNumber == null || HUDManager.Instance.clockIcon == null)
+            {
+                cachedClockParent = null;
+                cachedClockParentRect = null;
+                cachedClockIconRect = null;
+                cachedClockText = null;
+                hasStoredClockLayoutDefaults = false;
+                return false;
+            }
+
+            if (cachedClockParent == null)
+            {
+                cachedClockText = (TMP_Text)HUDManager.Instance.clockNumber;
+                cachedClockParent = cachedClockText.transform.parent;
+                cachedClockParentRect = cachedClockParent.GetComponent<RectTransform>();
+                cachedClockIconRect = HUDManager.Instance.clockIcon.GetComponent<RectTransform>();
+
+                if (cachedClockParentRect == null || cachedClockIconRect == null)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
     }
 
@@ -175,6 +303,16 @@ namespace Longer_Days
         }
     }
 
+    [HarmonyPatch(typeof(HUDManager), "Awake")]
+    internal class ClockLayoutPatch
+    {
+        [HarmonyPostfix]
+        private static void AwakePostfix()
+        {
+            LongerDaysPlugin.ApplyClockLayout();
+        }
+    }
+
     [HarmonyPatch(typeof(HUDManager), "SetClock")]
     internal class ClockPatch
     {
@@ -192,6 +330,8 @@ namespace Longer_Days
 
             string formatted = LongerDaysPlugin.FormatTime(hour, minute);
             ((TMP_Text)HUDManager.Instance.clockNumber).text = formatted;
+
+            LongerDaysPlugin.ApplyClockLayout();
         }
     }
 
