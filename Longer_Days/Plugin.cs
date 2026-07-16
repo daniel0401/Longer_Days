@@ -100,10 +100,11 @@ namespace Longer_Days
         }
     }
 
-    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.4.0")]
+    [BepInPlugin("ElecTRiCbOi59.LongerDays", "Longer Days", "1.5.0")]
     [BepInDependency("com.sigurd.csync", "5.0.1")]
     public class LongerDaysPlugin : BaseUnityPlugin
     {
+        private const float VanillaTimeSpeed = 1.4f;
         private const float RaisedClockYOffset = 28f;
         private const float CompactClockHeight = 50f;
         private const float CompactIconScale = 0.42f;
@@ -136,8 +137,6 @@ namespace Longer_Days
         }
 
         private static ClockUiState clockUi;
-        private static TimeOfDay currentTimeOfDay;
-        private static float vanillaTimeSpeed = 1.4f;
 
         private void Awake()
         {
@@ -147,7 +146,7 @@ namespace Longer_Days
             harmony = new Harmony("ElecTRiCbOi59.LongerDays");
             harmony.PatchAll();
 
-            log.LogInfo("Longer Days loaded (Sigurd-CSync).");
+            log.LogInfo("Longer Days loaded for Lethal Company v81.");
             log.LogInfo("Synced host TimeSpeed = " + Config.TimeSpeed.Value);
             log.LogInfo("Local ClockFormat = " + Config.ClockFormat.Value);
             log.LogInfo("Local ShowClockIndoors = " + Config.ShowClockIndoors.Value);
@@ -178,11 +177,17 @@ namespace Longer_Days
                 case "0.9":
                     return 0.9f;
                 case "1.0 (Normal)":
-                    return 1.0f;
+                    return 1f;
                 default:
                     log.LogWarning("Unknown TimeSpeed value '" + Config.TimeSpeed.Value + "'. Falling back to 0.5.");
                     return 0.5f;
             }
+        }
+
+        internal static void SetTimeSpeedBeforeUpdate(TimeOfDay timeOfDay)
+        {
+            float scale = GetConfiguredTimeScale();
+            timeOfDay.globalTimeSpeedMultiplier = VanillaTimeSpeed * scale;
         }
 
         internal static string FormatTime(int hour, int minute)
@@ -246,8 +251,8 @@ namespace Longer_Days
                 return;
             }
 
-            // Cache the original HUD layout once so config changes can be applied
-            // and reverted cleanly without stacking offsets every time SetClock runs.
+            // Keep the untouched HUD values so changing settings does not
+            // repeatedly add offsets or permanently alter the vanilla layout.
             clockUi.DefaultParentLocalPosition = clockUi.Parent.localPosition;
             clockUi.DefaultParentSizeDelta = clockUi.ParentRect.sizeDelta;
             clockUi.DefaultTextLocalPosition = clockUi.Text.transform.localPosition;
@@ -302,28 +307,22 @@ namespace Longer_Days
 
             return true;
         }
-
-        internal static void ApplyScaledTimeSpeed(TimeOfDay timeOfDay)
-        {
-            if (currentTimeOfDay != timeOfDay)
-            {
-                // A new TimeOfDay instance can appear on round or scene changes.
-                // Grab the current vanilla multiplier again before applying our scale.
-                currentTimeOfDay = timeOfDay;
-                vanillaTimeSpeed = timeOfDay.globalTimeSpeedMultiplier;
-            }
-
-            timeOfDay.globalTimeSpeedMultiplier = vanillaTimeSpeed * GetConfiguredTimeScale();
-        }
     }
 
-    [HarmonyPatch(typeof(TimeOfDay), "Update")]
+    /*
+     * V81 advances the real day inside MoveTimeOfDay.
+     *
+     * This must be a prefix. Applying the multiplier in an Update
+     * postfix only changes the value after the authoritative time has
+     * already progressed, which can leave the HUD behind the actual day.
+     */
+    [HarmonyPatch(typeof(TimeOfDay), "MoveTimeOfDay")]
     internal class TimePatch
     {
-        [HarmonyPostfix]
-        private static void UpdatePostfix(TimeOfDay __instance)
+        [HarmonyPrefix]
+        private static void MoveTimeOfDayPrefix(TimeOfDay __instance)
         {
-            LongerDaysPlugin.ApplyScaledTimeSpeed(__instance);
+            LongerDaysPlugin.SetTimeSpeedBeforeUpdate(__instance);
         }
     }
 
@@ -349,13 +348,13 @@ namespace Longer_Days
             }
 
             int totalMinutes = (int)(timeNormalized * (60f * numberOfHours)) + 360;
-            int hour = totalMinutes / 60;
+            int hour = totalMinutes / 60 % 24;
             int minute = totalMinutes % 60;
 
             ((TMP_Text)HUDManager.Instance.clockNumber).text = LongerDaysPlugin.FormatTime(hour, minute);
 
-            // The game updates the clock text here, so this is a reliable place to
-            // reapply our local HUD tweaks without fighting the entire HUD every frame.
+            // SetClock can overwrite parts of the HUD, so reapply only
+            // the clock-specific layout changes after it has finished.
             LongerDaysPlugin.RefreshClockLayout();
         }
     }
